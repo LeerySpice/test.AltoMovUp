@@ -1,0 +1,335 @@
+---
+title: "Prueba técnica AltoMovUp"
+author: "Eduardo Jara Alfaro"
+output: html_document
+---
+
+***
+
+> Código disponible en <https://github.com/LeerySpice/test.AltoMovUp>
+
+Carga de librerias
+
+```{r setup, include=T, message=F, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr); library(httr); library(googleVis)
+library(leaflet); library(sparklyr); library(lattice)
+library(caret); library(leaflet); library(lubridate)
+library(dmm); library(ggplot2); library(scales)
+library(gridExtra); library(stringr); library(leaflet.extras)
+library(NbClust); library(factoextra); library(clValid)
+```
+
+
+Create folders and load data
+
+```{r unzip, echo=T, eval=FALSE}
+path.OS <- "./data/"
+
+if (!dir.exists("data")){
+  dir.create("data")
+} 
+
+unzip(paste0(path.OS, list.files(path=path.OS, pattern = "zip")),
+      exdir = "./data", overwrite = TRUE)
+```
+
+```{r primera.lectura, echo=TRUE, eval=FALSE}
+# read database files
+file_list <- list.files(path="./data/", pattern = "csv")
+
+clientes <- read.csv(paste0("./data/",file_list[1]))
+despachos <- read.csv(paste0("./data/",file_list[2]))
+posiciones <- read.csv(paste0("./data/",file_list[3]))
+
+#Para acceder más rapido en futuras compilaciones, se utilizará formato nativo RDS
+saveRDS(posiciones, "./data/pos.RDS")
+saveRDS(clientes, "./data/clientes.RDS")
+saveRDS(despachos, "./data/despachos.RDS")
+
+```
+
+```{r lectura, echo=TRUE}
+
+posiciones <- readRDS("./data/pos.RDS")
+clientes <- readRDS("./data/clientes.RDS")
+despachos <- readRDS("./data/despachos.RDS")
+
+```
+
+### 1. Hacer una percepción que tenga de la data. Evaluar Calidad, Consistencia, Coherencia de la data.
+
+```{r datos, echo=TRUE}
+# head para visualizar
+head(clientes)
+head(despachos)
+head(posiciones)
+
+# Clases
+str(clientes)
+str(despachos)
+str(posiciones)
+
+# es necesario convertir a datetime el timestamp del gps para mejorar
+# la velocidad de acceso al dataframe
+posiciones$Fecha <- as_datetime(posiciones$Fecha)
+posiciones$FechaInsercion <- as_datetime(posiciones$FechaInsercion)
+
+# Ignicion se pasa a logico
+posiciones$Ignicion <- as.logical(posiciones$Ignicion)
+str(posiciones)
+
+# limpiar names de variable
+names(clientes) <- str_sub(names(clientes),6L)
+names(despachos) <- str_sub(names(despachos),10L)
+
+# convertir a datetime valores en despachos
+despachos$SalidaGPS <- ymd_hms(despachos$SalidaGPS)
+despachos$LlegadaGPS <- ymd_hms(despachos$LlegadaGPS)
+
+# Porcentaje casos completos clientes
+(sum(complete.cases(clientes))*100)/dim(clientes)[1]
+# Porcentaje casos completos despachos
+(sum(complete.cases(despachos))*100)/dim(despachos)[1]
+# Porcentaje casos completos despachos
+(sum(complete.cases(posiciones[,-c(9:12)]))*100)/dim(posiciones[,-c(9:12)])[1]
+
+```
+
+Se puede observar que la data se encuentra completa, por lo cual ya fueron removidos los casos (si es que hubiese) de data incompleta.
+
+Fue necesario cambiar la clase a algunas variables para mejorar sustancialmente el acceso a los dataframes
+
+
+### 2. Dibujar en un mapa al menos un viaje (Desde inicio hasta final. Suponga que por día se hace un solo viaje por patente)
+
+```{r mapa, echo=TRUE, cache=T, warning=FALSE}
+# Filtro por vehiculo y dias de viaje
+Patente <- unique(posiciones$Patente)
+dias <- unique(date(posiciones$Fecha))
+
+# Obtendré los primeros cinco vehiculos en el primer dia
+pat <- Patente[1:5]
+viajes <- posiciones %>% filter(date(Fecha)==dias[1]) %>%
+           filter(Patente==pat)
+
+
+# Palette colors como factor
+pal <- colorFactor(grDevices::rainbow(5), domain = Patente[1:5])
+# map with OpenStreatMap
+map <- leaflet() %>% addTiles()
+map %>% addCircles(data = viajes,lng = ~Longitud, lat = ~Latitud, 
+                   label = ~Patente, color = ~pal(Patente)) 
+
+```
+
+
+### 3. ¿De qué hora a qué hora es la operación del cliente?
+
+```{r hora, echo=TRUE}
+# Se genera df de operación cuando Ignición=TRUE (encendido de vehiculo)
+posiciones %>% filter(Ignicion == T) %>% {.->> operacion}
+# Para obtener plot dinamico en html, generaré sample con 1M casos
+operacion <- operacion[sample(1:nrow(operacion),1e6),]
+
+# ggplot usando posiciones.csv, agrupando por vehiculo
+g <- ggplot(operacion, aes(hour(Fecha), fill = Patente, color = Patente)) + 
+  geom_histogram(alpha = 0.3, binwidth=1)  +
+  labs(title="Horas de Operación",x="Hora", y = "Cantidad")
+# via plotly
+plotly::ggplotly(g)
+
+# Se revisa informacion de salida y entrada a geocerca en despachos.csv
+hist1 <- histogram(hour(na.omit(despachos$SalidaGPS)),  
+                   breaks=seq(from=0,to=23,by=1), xlab="Hora", main = "SalidaGPS")
+hist2 <- histogram(hour(na.omit(despachos$LlegadaGPS)),
+                   breaks=seq(from=0,to=23,by=1), xlab="Hora", main = "LlegadaGPS")
+grid.arrange(hist1,hist2, ncol=2)
+
+# usando ggplot para despachos.csv
+g2 <- ggplot(subset(despachos, !is.na(SalidaGPS)),
+             aes(hour(SalidaGPS), fill = Patente,
+                 color = Patente)) +
+  geom_histogram(alpha = 0.3, binwidth=1)  +
+  labs(title="Salida GPS geocerca",x="Hora", y = "Cantidad")
+
+plotly::ggplotly(g2)
+
+```
+
+## 4. ¿Existe algún día que tenga mayor concentración de viajes?.
+
+```{r viajes, echo=T}
+# Cinco dias con mayor concentracion viajes
+sort(table(as.Date(despachos$FechaViaje)), decreasing = T)[1:5]
+
+# Visualización de todos los viajes por dia
+h <- ggplot(despachos, aes(as.Date(FechaViaje))) + 
+  geom_histogram(aes(y=..density.., fill = cut(..density.., c(0, sort(..density.., TRUE)[1:2]))), alpha = 0.8, binwidth=1)  +
+  labs(title="Viajes",x="Dia", y = "Cantidad") + 
+  scale_x_date(labels = date_format("%d-%m"), breaks = date_breaks("day")) +
+  scale_fill_manual("", values = c("red", "green")) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle=45, hjust=1, vjust = 1, size=4),
+        legend.position="none")
+
+plotly::ggplotly(h)
+
+```
+Por lo tanto el día de mayor viajes es el **"2019-11-07"**
+
+
+### 5.  Declare el top 5 de clientes con más entregas
+
+```{r top, echo=TRUE, cache=T}
+# merge a database for destinocodigo id
+merge <- merge(clientes, despachos, by="DestinoCodigo")
+# top 5 clientes
+sort(table(merge$Nombrezona), decreasing = T)[1:5]
+```
+
+
+### 6. Presente mapa de calor con los lugares donde existan más posiciones.
+
+```{r calormap, echo=T}
+# Para plot dinámico, sample a 1M datos
+map.pos <- posiciones[sample(1:nrow(posiciones),1e6),]
+
+# mapeo
+map %>% addHeatmap(data = map.pos,lng = ~Longitud, lat = ~Latitud, intensity = 1,
+             blur = 20, max = 0.05, radius = 15) 
+```
+
+
+### 7. Existe alguna relación entre el FDI y la cantidad de señales enviadas?
+
+```{r fdi, echo=TRUE, cache=T}
+# Obtener difftime entre registros gps. 
+# Se genera sample de dataframe com primeros 1M casos
+dsample <- posiciones[1:1000000, ]
+difftime <- as.numeric(int_diff(dsample$Fecha))
+# plot de diferencia entre registro de hardwre y de sistema (FDI)
+plot(difftime, dsample$FDI[-1], pch=16, col=rgb(red=0.2, green=0.2, blue=1.0, alpha=0.2))
+```
+
+Se puede observar que mientras mayor es la cantidad de registros en el sistema por segundo (i.e., difftime -> 0), el valor de FDI aumenta.
+
+
+### 8. En la siguiente página se encuentra qué vehículos tienen infracciones: <https://www.sem.gob.cl/pcirc/buscar_multas.php?&tipo=0&patente=[Patente]&rut=0> Identifique qué vehículos tienen infracciones o no.
+
+
+```{r patentes, echo=T, cache=TRUE}
+# se obtiene string de consulta limpio
+html.str <- "https://www.sem.gob.cl/pcirc/buscar_multas.php?&patente="
+
+# se añaden las patentes
+Patentes <- as.data.frame(Patente, Multas = 0L)
+
+for (i in 1:dim(Patentes)[1]){
+  r <- GET(paste0(html.str,Patentes[i,1]))
+  char.html <- rawToChar(r$content)
+  Patentes[i,"Multas"] <- stringr::str_extract(char.html,
+                                            "Motivo|no presenta multas")
+}
+
+Patentes[Patentes[,2] == "Motivo",2] <- "Si"
+Patentes[Patentes[,2] == "no presenta multas",2] <- "No"
+
+Patentes[Patentes[,2]=="Si",]
+
+```
+
+
+
+### 9. Con todos los datos dados o las variables que desee construir, segmentar los vehículo en diferentes grupos.
+
+```{r, echo=TRUE, cache=TRUE, warning=FALSE, message=FALSE}
+
+# Seleccion de caracteristicas
+posiciones %>% filter(Ignicion==T) %>% 
+  dplyr::select(Patente, Latitud, Longitud, Velocidad) %>% 
+  group_by(Patente) %>% summarise(avg.lat=mean(Latitud), avg.lon = mean(Longitud), 
+                                  avg.vel = mean(Velocidad)) %>% {.->> mean.patente}
+
+# normalizacion e identificacion
+ds <- data.frame(scale(mean.patente[-1]))
+rownames(ds) <- pull(mean.patente[,1])
+
+# optimizacion numero clusters k
+summary(clValid(ds, nClust = 3:10, c("kmeans", "clara"), "internal", maxitems=nrow(ds)))
+
+# fijar semilla y kmeans con k=3 (optimo)
+set.seed(7)
+kms.res <- kmeans(ds, centers = 3, nstart = 20)
+
+
+# plot cluster PCA reduccion
+fviz_cluster(kms.res, data=ds, 
+            palette="jco", geom = c("point","text"), 
+            labelsize = 8, pointsize = 1, star.plot=F,
+            ggtheme=theme_minimal()
+)
+
+
+# Validacion con Silhouette Kmeans k3
+sil <- silhouette(kms.res$cluster, dist(ds))
+fviz_silhouette(sil)
+
+# integrar clusters a df
+mean.patente$cluster <- factor(kms.res$cluster)
+t(mean.patente[,c(1,5)])
+
+```
+Se puede observar que los vehiculos, a partir de las variables escogidas, clusteriza bien en 3 niveles. 
+
+```{r map.cluster, echo=TRUE}
+
+pal2 <- colorFactor(grDevices::rainbow(3), domain = 1:3)
+map %>% addCircles(data = mean.patente ,lng = ~avg.lon, lat = ~avg.lat, 
+                   label = ~Patente, color = ~pal2(cluster)) 
+
+```
+
+A partir de la visualización del centroide de trayectorias, se puede observar que el cluster 3 se define claramente por su presencia en una region diferente del pais. Sin embargo, no se observa diferencias significativas en la geolocalizacion de los clusters 1 y 2
+
+
+```{r vel.cluster, echo=TRUE, warning=FALSE, message=FALSE}
+mean.patente %>% group_by(cluster) %>% summarise(avg.cluster = mean(avg.vel))
+```
+
+Mirando la velocidad se observa que la diferencia entre estos cluster radica en la velocidad promedio reportada, tomando el cluster 1 un valor de ~ 18 km/h adicionales en promedio al cluster agrupado en la misma zona geografica
+
+## 10. Con la información entregada, genere un modelo que identifique la probabilidad de un vehículo tenga infracciones o no.
+
+```{r model, echo=TRUE}
+# Merge estado multa a df creado anteriormente
+pp <- merge(mean.patente,Patentes, by="Patente")
+
+# Variable Multa como factor
+pp$Multas<-factor(car::Recode(pp$Multas,"'No'=0;'Si'=1"),labels=c("No","Si"))
+summary.factor(pp$Multas)
+
+#método: regresión logística, var dependiente: multa= si/no (dummy)
+modlog1 <- glm(Multas ~ avg.lat + avg.lon + avg.vel, 
+               data= pp, family='binomial')
+
+# Summary model
+summary(modlog1)
+```
+
+Se puede observar que la variable mas significativa es la velocidad con $ Pr = 0.0667$.
+Se observa que las variables, en general, no modulan correctamente el comportamiento de multa/no multa.
+
+Para obtener la probabilidad por vehículo se tiene
+
+```{r prob, echo=TRUE}
+#obtener las probabilidades en lugar de los logODDs si type="response"
+# se a 4 cifras
+pp$Prob.multa <- round(predict(modlog1,type=c("response")),4)
+summary(pp$Prob.multa)
+
+# 10 vehiculos con por mayor probabilidad de multas
+pp[order(pp$Prob.multa, decreasing = T),][1:10,]
+
+```
+
